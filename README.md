@@ -386,9 +386,3 @@ A failed RCON warning does **not** prevent the update from being installed.
 - Metamod, CounterStrikeSharp, or other third-party plugins may temporarily break after a major CS2 update.
 - The update timer checks for new builds; it does not blindly restart the server on every timer run.
 - Steam App ID `730` is used for the CS2 Dedicated Server installation.
-
-## 📜 License
-
-No license is included by default.
-
-If you plan to publish this project publicly, consider adding a license such as the MIT License.
