@@ -789,6 +789,6 @@ main() {
     write_updater
     write_systemd_units
     finish
-}
+} 
 
 main "$@"
