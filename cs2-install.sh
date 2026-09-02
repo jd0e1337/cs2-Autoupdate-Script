@@ -14,7 +14,7 @@ UPDATE_SERVICE_FILE="/etc/systemd/system/cs2-autoupdate.service"
 UPDATE_TIMER_FILE="/etc/systemd/system/cs2-autoupdate.timer"
 
 die() {
-    echo "FEHLER: $*" >&2
+    echo "ERROR: $*" >&2
     exit 1
 }
 
@@ -67,18 +67,18 @@ cfg_escape() {
 }
 
 require_root() {
-    [[ "${EUID}" -eq 0 ]] || die "Bitte als root ausführen: sudo $0"
+    [[ "${EUID}" -eq 0 ]] || die "Please run as root: sudo $0"
 }
 
 check_platform() {
-    [[ "$(uname -s)" == "Linux" ]] || die "Dieses Script ist nur für Linux gedacht."
+    [[ "$(uname -s)" == "Linux" ]] || die "This script is intended for Linux only."
 
     case "$(uname -m)" in
         x86_64|amd64) ;;
-        *) die "Dieses Script unterstützt aktuell nur x86_64/amd64." ;;
+        *) die "This script currently supports x86_64/amd64 only." ;;
     esac
 
-    [[ -r /etc/os-release ]] || die "/etc/os-release fehlt."
+    [[ -r /etc/os-release ]] || die "/etc/os-release is missing."
     # shellcheck disable=SC1091
     source /etc/os-release
 
@@ -86,7 +86,7 @@ check_platform() {
         debian|ubuntu) ;;
         *)
             if [[ "${ID_LIKE:-}" != *debian* ]]; then
-                die "Unterstützt werden Debian/Ubuntu bzw. Debian-basierte Systeme."
+                die "Supported systems are Debian/Ubuntu and Debian-based distributions."
             fi
             ;;
     esac
@@ -95,39 +95,39 @@ check_platform() {
 collect_settings() {
     echo "CS2 Dedicated Server Installer"
     echo "------------------------------"
-    echo "Voreinstellung: 16-Slot Deathmatch, Port 27015, Update-Check alle 5 Minuten."
+    echo "Default: 16-slot Deathmatch, port 27015, update check every 5 minutes."
     echo
 
-    SERVER_USER="$(ask "Linux-Benutzer für den CS2-Server" "steam")"
-    [[ "$SERVER_USER" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || die "Ungültiger Linux-Benutzername."
+    SERVER_USER="$(ask "Linux user for the CS2 server" "steam")"
+    [[ "$SERVER_USER" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || die "Invalid Linux username."
 
     if id "$SERVER_USER" >/dev/null 2>&1; then
         SERVER_HOME="$(getent passwd "$SERVER_USER" | cut -d: -f6)"
-        [[ -n "$SERVER_HOME" ]] || die "Home-Verzeichnis für $SERVER_USER konnte nicht ermittelt werden."
+        [[ -n "$SERVER_HOME" ]] || die "Could not determine home directory for $SERVER_USER."
     else
         SERVER_HOME="/home/$SERVER_USER"
     fi
 
-    [[ "$SERVER_HOME" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "Das Home-Verzeichnis enthält nicht unterstützte Zeichen: $SERVER_HOME"
+    [[ "$SERVER_HOME" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "The home directory contains unsupported characters: $SERVER_HOME"
 
-    INSTALL_DIR="$(ask "CS2 Installationsverzeichnis" "$SERVER_HOME/cs2")"
-    [[ "$INSTALL_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]         || die "Installationspfad muss absolut sein und darf nur Buchstaben, Zahlen, /, ., _ und - enthalten."
+    INSTALL_DIR="$(ask "CS2 installation directory" "$SERVER_HOME/cs2")"
+    [[ "$INSTALL_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]]         || die "Installation path must be absolute and may only contain letters, numbers, /, ., _ and -."
 
-    HOSTNAME_VALUE="$(ask "Servername" "My CS2 Deathmatch")"
+    HOSTNAME_VALUE="$(ask "Server name" "My CS2 Deathmatch")"
 
     PORT="$(ask "Game/RCON-Port" "27015")"
-    valid_uint "$PORT" && (( PORT >= 1 && PORT <= 65535 )) || die "Ungültiger Port."
+    valid_uint "$PORT" && (( PORT >= 1 && PORT <= 65535 )) || die "Invalid port."
 
-    MAXPLAYERS="$(ask "Maximale Slots" "16")"
-    valid_uint "$MAXPLAYERS" && (( MAXPLAYERS >= 1 && MAXPLAYERS <= 64 )) || die "Slots müssen zwischen 1 und 64 liegen."
+    MAXPLAYERS="$(ask "Maximum slots" "16")"
+    valid_uint "$MAXPLAYERS" && (( MAXPLAYERS >= 1 && MAXPLAYERS <= 64 )) || die "Slots must be between 1 and 64."
 
     echo
-    echo "Spielmodus:"
+    echo "Game mode:"
     echo "  1) Deathmatch   (game_type 1 / game_mode 2)"
     echo "  2) Competitive  (0 / 1)"
     echo "  3) Casual       (0 / 0)"
-    echo "  4) Eigene Werte"
-    MODE_CHOICE="$(ask "Auswahl" "1")"
+    echo "  4) Custom values"
+    MODE_CHOICE="$(ask "Selection" "1")"
 
     case "$MODE_CHOICE" in
         1)
@@ -145,54 +145,54 @@ collect_settings() {
         4)
             GAME_TYPE="$(ask "game_type" "1")"
             GAME_MODE="$(ask "game_mode" "2")"
-            valid_uint "$GAME_TYPE" || die "game_type muss numerisch sein."
-            valid_uint "$GAME_MODE" || die "game_mode muss numerisch sein."
+            valid_uint "$GAME_TYPE" || die "game_type must be numeric."
+            valid_uint "$GAME_MODE" || die "game_mode must be numeric."
             ;;
         *)
-            die "Ungültige Modus-Auswahl."
+            die "Invalid mode selection."
             ;;
     esac
 
-    START_MAP="$(ask "Start-Map" "de_dust2")"
-    [[ "$START_MAP" =~ ^[A-Za-z0-9_./-]+$ ]] || die "Ungültiger Map-Name."
+    START_MAP="$(ask "Start map" "de_dust2")"
+    [[ "$START_MAP" =~ ^[A-Za-z0-9_./-]+$ ]] || die "Invalid map name."
 
     echo
-    echo "GSLT wird für einen öffentlichen CS2-Server benötigt (App ID 730)."
-    read -r -s -p "GSLT (leer lassen für später/LAN): " GSLT
+    echo "A GSLT is required for a public CS2 server (App ID 730)."
+    read -r -s -p "GSLT (leave blank for later/LAN): " GSLT
     echo
 
     echo
-    read -r -s -p "RCON-Passwort (leer = automatisch erzeugen): " RCON_PASSWORD
+    read -r -s -p "RCON password (blank = generate automatically): " RCON_PASSWORD
     echo
     if [[ -z "$RCON_PASSWORD" ]]; then
         RCON_PASSWORD="$(openssl rand -hex 24 2>/dev/null || true)"
         if [[ -z "$RCON_PASSWORD" ]]; then
             RCON_PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
         fi
-        echo "RCON-Passwort wurde automatisch erzeugt."
+        echo "RCON password was generated automatically."
     fi
-    [[ "$RCON_PASSWORD" != *$'\n'* && "$RCON_PASSWORD" != *$'\r'* ]] || die "RCON-Passwort darf keinen Zeilenumbruch enthalten."
+    [[ "$RCON_PASSWORD" != *$'\n'* && "$RCON_PASSWORD" != *$'\r'* ]] || die "RCON password must not contain a line break."
 
-    read -r -s -p "Server-Passwort (leer = öffentlich): " SV_PASSWORD
+    read -r -s -p "Server password (blank = public): " SV_PASSWORD
     echo
-    [[ "$SV_PASSWORD" != *$'\n'* && "$SV_PASSWORD" != *$'\r'* ]] || die "Server-Passwort darf keinen Zeilenumbruch enthalten."
+    [[ "$SV_PASSWORD" != *$'\n'* && "$SV_PASSWORD" != *$'\r'* ]] || die "Server password must not contain a line break."
 
-    UPDATE_INTERVAL_MINUTES="$(ask "Update-Check alle wie viele Minuten?" "5")"
+    UPDATE_INTERVAL_MINUTES="$(ask "Check for updates every how many minutes?" "5")"
     valid_uint "$UPDATE_INTERVAL_MINUTES" && (( UPDATE_INTERVAL_MINUTES >= 1 && UPDATE_INTERVAL_MINUTES <= 1440 )) \
-        || die "Update-Intervall muss zwischen 1 und 1440 Minuten liegen."
+        || die "Update interval must be between 1 and 1440 minutes."
 
-    UPDATE_MESSAGE="$(ask "5-Minuten-RCON-Nachricht" "CS2 Released an Update - Restart in 5 minutes")"
+    UPDATE_MESSAGE="$(ask "5-minute RCON message" "CS2 Released an Update - Restart in 5 minutes")"
     UPDATE_MESSAGE="${UPDATE_MESSAGE//$'\r'/}"
     UPDATE_MESSAGE="${UPDATE_MESSAGE//$'\n'/ }"
 
     START_NOW="no"
-    if ask_yes_no "Server nach der Installation direkt starten?" "y"; then
+    if ask_yes_no "Start the server immediately after installation?" "y"; then
         START_NOW="yes"
     fi
 }
 
 install_packages() {
-    info "Installiere benötigte Pakete"
+    info "Installing required packages"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y \
@@ -208,15 +208,15 @@ install_packages() {
 
 create_user() {
     if id "$SERVER_USER" >/dev/null 2>&1; then
-        info "Benutzer $SERVER_USER existiert bereits"
+        info "User $SERVER_USER already exists"
     else
-        info "Lege Benutzer $SERVER_USER an"
+        info "Creating user $SERVER_USER"
         useradd --create-home --home-dir "$SERVER_HOME" --shell /bin/bash "$SERVER_USER"
     fi
 
     SERVER_HOME="$(getent passwd "$SERVER_USER" | cut -d: -f6)"
     SERVER_GROUP="$(id -gn "$SERVER_USER")"
-    [[ -n "$SERVER_HOME" ]] || die "Home-Verzeichnis konnte nicht ermittelt werden."
+    [[ -n "$SERVER_HOME" ]] || die "Could not determine home directory."
 
     STEAMCMD_DIR="$SERVER_HOME/steamcmd"
     STEAMCMD="$STEAMCMD_DIR/steamcmd.sh"
@@ -224,7 +224,7 @@ create_user() {
 }
 
 install_steamcmd() {
-    info "Installiere/aktualisiere SteamCMD"
+    info "Installing/updating SteamCMD"
 
     install -d -m 0755 -o "$SERVER_USER" -g "$SERVER_GROUP" "$STEAMCMD_DIR"
 
@@ -244,7 +244,7 @@ install_steamcmd() {
 }
 
 install_cs2() {
-    info "Installiere/aktualisiere Counter-Strike 2 (App ID $APPID)"
+    info "Installing/updating Counter-Strike 2 (App ID $APPID)"
 
     install -d -m 0755 -o "$SERVER_USER" -g "$SERVER_GROUP" "$INSTALL_DIR"
 
@@ -255,7 +255,7 @@ install_cs2() {
     fi
 
     if [[ -f "$manifest" ]]; then
-        echo "Bestehende Installation erkannt: normales app_update ohne validate."
+        echo "Existing installation detected: normal app_update without validate."
         runuser -u "$SERVER_USER" -- env HOME="$SERVER_HOME" \
             "$STEAMCMD" \
             +force_install_dir "$INSTALL_DIR" \
@@ -263,7 +263,7 @@ install_cs2() {
             +app_update "$APPID" \
             +quit
     else
-        echo "Neuinstallation erkannt: erster Download mit validate."
+        echo "New installation detected: initial download with validate."
         runuser -u "$SERVER_USER" -- env HOME="$SERVER_HOME" \
             "$STEAMCMD" \
             +force_install_dir "$INSTALL_DIR" \
@@ -273,11 +273,11 @@ install_cs2() {
     fi
 
     [[ -x "$INSTALL_DIR/game/bin/linuxsteamrt64/cs2" ]] \
-        || die "CS2-Binary wurde nicht gefunden: $INSTALL_DIR/game/bin/linuxsteamrt64/cs2"
+        || die "CS2 binary was not found: $INSTALL_DIR/game/bin/linuxsteamrt64/cs2"
 }
 
 install_steam_sdk_links() {
-    info "Richte Steam-SDK-Libraries ein"
+    info "Setting up Steam SDK libraries"
 
     install -d -m 0755 -o "$SERVER_USER" -g "$SERVER_GROUP" \
         "$SERVER_HOME/.steam/sdk32" \
@@ -297,7 +297,7 @@ install_steam_sdk_links() {
 }
 
 write_runtime_config() {
-    info "Schreibe Konfiguration"
+    info "Writing configuration"
 
     install -d -m 0755 "$CONFIG_DIR"
     install -d -m 0700 -o "$SERVER_USER" -g "$SERVER_GROUP" "$SECRET_DIR"
@@ -510,7 +510,7 @@ RCON_PASSWORD_FILE="$SERVER_HOME/.config/cs2/rcon.password"
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-    log "Ein anderer Update-Check läuft bereits."
+    log "Another update check is already running."
     exit 0
 fi
 
@@ -551,7 +551,7 @@ get_remote_build() {
     rm -f "$tmp"
 
     [[ "$build" =~ ^[0-9]+$ ]] || {
-        log "Remote Build-ID konnte nicht aus SteamCMD gelesen werden." >&2
+        log "Could not read remote build ID from SteamCMD." >&2
         return 1
     }
 
@@ -562,7 +562,7 @@ rcon_say() {
     local message="$1"
 
     if [[ ! -x "$RCON_HELPER" || ! -r "$RCON_PASSWORD_FILE" ]]; then
-        log "RCON ist nicht verfügbar; Warnung '$message' konnte nicht gesendet werden."
+        log "RCON is unavailable; warning '$message' could not be sent."
         return 0
     fi
 
@@ -572,7 +572,7 @@ rcon_say() {
         --port "$PORT" \
         --password-file "$RCON_PASSWORD_FILE" \
         "say $message" >/dev/null 2>&1; then
-        log "RCON-Warnung konnte nicht gesendet werden: $message"
+        log "Could not send RCON warning: $message"
     else
         log "RCON: $message"
     fi
@@ -580,21 +580,21 @@ rcon_say() {
 
 LOCAL_BUILD="$(get_local_build || true)"
 [[ "$LOCAL_BUILD" =~ ^[0-9]+$ ]] || {
-    log "Lokale Build-ID konnte nicht ermittelt werden: $MANIFEST"
+    log "Could not determine local build ID: $MANIFEST"
     exit 1
 }
 
 REMOTE_BUILD="$(get_remote_build || true)"
 [[ "$REMOTE_BUILD" =~ ^[0-9]+$ ]] || exit 1
 
-log "Lokal: $LOCAL_BUILD | Steam public: $REMOTE_BUILD"
+log "Local: $LOCAL_BUILD | Steam public: $REMOTE_BUILD"
 
 if [[ "$LOCAL_BUILD" == "$REMOTE_BUILD" ]]; then
-    log "CS2 ist aktuell."
+    log "CS2 is up to date."
     exit 0
 fi
 
-log "CS2-Update erkannt."
+log "CS2 update detected."
 
 if systemctl is-active --quiet cs2.service; then
     if [[ -r "$MESSAGE_FILE" ]]; then
@@ -615,42 +615,42 @@ if systemctl is-active --quiet cs2.service; then
     rcon_say "Server restart in 10 seconds"
     sleep 10
 else
-    log "CS2 läuft nicht; überspringe 5-Minuten-Countdown."
+    log "CS2 is not running; skipping 5-minute countdown."
 fi
 
-# Die Build-ID könnte sich während des Countdowns erneut geändert haben.
+# The build ID may have changed again during the countdown.
 LATEST_REMOTE_BUILD="$(get_remote_build || true)"
 if [[ "$LATEST_REMOTE_BUILD" =~ ^[0-9]+$ ]]; then
     REMOTE_BUILD="$LATEST_REMOTE_BUILD"
 fi
 
-log "Stoppe CS2."
+log "Stopping CS2."
 systemctl stop cs2.service || true
 
-log "Installiere CS2-Update auf Build $REMOTE_BUILD."
+log "Installing CS2 update to build $REMOTE_BUILD."
 if ! runuser -u "$SERVER_USER" -- env HOME="$SERVER_HOME" \
     "$STEAMCMD" \
     +force_install_dir "$INSTALL_DIR" \
     +login anonymous \
     +app_update "$APPID" \
     +quit; then
-    log "SteamCMD-Update fehlgeschlagen. Versuche den Server wieder zu starten."
+    log "SteamCMD update failed. Attempting to start the server again."
     systemctl start cs2.service || true
     exit 1
 fi
 
 NEW_LOCAL_BUILD="$(get_local_build || true)"
-log "Lokale Build-ID nach Update: ${NEW_LOCAL_BUILD:-unbekannt}"
+log "Local build ID after update: ${NEW_LOCAL_BUILD:-unknown}"
 
-log "Starte CS2."
+log "Starting CS2."
 systemctl start cs2.service
 
 sleep 5
 
 if systemctl is-active --quiet cs2.service; then
-    log "CS2 läuft wieder."
+    log "CS2 is running again."
 else
-    log "FEHLER: cs2.service ist nach dem Update nicht aktiv."
+    log "ERROR: cs2.service is not active after the update."
     systemctl status cs2.service --no-pager || true
     exit 1
 fi
@@ -659,7 +659,7 @@ EOF
 }
 
 write_systemd_units() {
-    info "Richte systemd-Services ein"
+    info "Setting up systemd services"
 
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -719,7 +719,7 @@ EOF
 finish() {
     echo
     echo "============================================================"
-    echo "CS2 Installation abgeschlossen"
+    echo "CS2 installation completed"
     echo "============================================================"
     echo "User:          $SERVER_USER"
     echo "Install dir:   $INSTALL_DIR"
@@ -728,9 +728,9 @@ finish() {
     echo "Start map:     $START_MAP"
     echo "game_type:     $GAME_TYPE"
     echo "game_mode:     $GAME_MODE"
-    echo "Update check:  alle $UPDATE_INTERVAL_MINUTES Minuten"
+    echo "Update check:  every $UPDATE_INTERVAL_MINUTES minutes"
     echo
-    echo "Wichtige Befehle:"
+    echo "Important commands:"
     echo "  systemctl start cs2"
     echo "  systemctl stop cs2"
     echo "  systemctl restart cs2"
@@ -746,30 +746,30 @@ finish() {
     echo "  $INSTALL_DIR/game/csgo/cfg/server.cfg"
     echo
     echo "Firewall/NAT:"
-    echo "  Öffne/forwarde $PORT/udp für das Spiel."
-    echo "  $PORT/tcp wird für RCON benötigt; extern solltest du RCON nach Möglichkeit"
-    echo "  per Firewall auf vertrauenswürdige IPs beschränken."
+    echo "  Open/forward $PORT/udp for the game."
+    echo "  $PORT/tcp is required for RCON; externally, you should restrict RCON if possible"
+    echo "  via firewall to trusted IP addresses."
     echo
     if [[ -z "$GSLT" ]]; then
-        echo "HINWEIS: Es wurde kein GSLT gesetzt."
-        echo "Später in $SECRET_DIR/gslt.token eintragen und anschließend:"
+        echo "NOTE: No GSLT was configured."
+        echo "Add it later to $SECRET_DIR/gslt.token and then run:"
         echo "  systemctl restart cs2"
         echo
     fi
-    echo "RCON-Passwort:"
+    echo "RCON password:"
     echo "  $RCON_PASSWORD"
     echo
-    echo "Bitte das Passwort jetzt sicher speichern. Es steht außerdem in server.cfg"
-    echo "und geschützt in $SECRET_DIR/rcon.password."
+    echo "Please store the password securely now. It is also stored in server.cfg"
+    echo "and protected in $SECRET_DIR/rcon.password."
     echo
 
     if [[ "$START_NOW" == "yes" ]]; then
-        info "Starte CS2"
+        info "Starting CS2"
         systemctl restart cs2.service
         sleep 3
         systemctl --no-pager --full status cs2.service || true
     else
-        echo "Der Server wurde noch nicht gestartet."
+        echo "The server has not been started yet."
         echo "Start: systemctl start cs2"
     fi
 }
