@@ -57,6 +57,17 @@ valid_uint() {
     [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+valid_ipv4() {
+    local ip="$1" octet
+    local IFS=.
+    read -r -a octets <<< "$ip"
+    [[ ${#octets[@]} -eq 4 ]] || return 1
+    for octet in "${octets[@]}"; do
+        [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+        (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+    done
+}
+
 cfg_escape() {
     local s="$1"
     s="${s//\\/\\\\}"
@@ -117,6 +128,9 @@ collect_settings() {
 
     PORT="$(ask "Game/RCON-Port" "27015")"
     valid_uint "$PORT" && (( PORT >= 1 && PORT <= 65535 )) || die "Invalid port."
+
+    BIND_IP="$(ask "Bind IP address" "0.0.0.0")"
+    valid_ipv4 "$BIND_IP" || die "Invalid IPv4 address."
 
     MAXPLAYERS="$(ask "Maximum slots" "16")"
     valid_uint "$MAXPLAYERS" && (( MAXPLAYERS >= 1 && MAXPLAYERS <= 64 )) || die "Slots must be between 1 and 64."
@@ -276,6 +290,26 @@ install_cs2() {
         || die "CS2 binary was not found: $INSTALL_DIR/game/bin/linuxsteamrt64/cs2"
 }
 
+install_v8_compat_links() {
+    info "Setting up CS2 V8 compatibility library links"
+
+    local src_dir="$INSTALL_DIR/game/bin/linuxsteamrt64"
+    local dst_dir="$INSTALL_DIR/game/csgo/bin/linuxsteamrt64"
+    local lib found=0
+
+    install -d -m 0755 -o "$SERVER_USER" -g "$SERVER_GROUP" "$dst_dir"
+
+    for lib in "$src_dir"/libv8*.so; do
+        [[ -e "$lib" ]] || continue
+        found=1
+        ln -sfn "$lib" "$dst_dir/$(basename "$lib")"
+    done
+
+    (( found == 1 )) || die "No libv8*.so libraries found in $src_dir"
+
+    chown -h "$SERVER_USER:$SERVER_GROUP" "$dst_dir"/libv8*.so 2>/dev/null || true
+}
+
 install_steam_sdk_links() {
     info "Setting up Steam SDK libraries"
 
@@ -309,6 +343,7 @@ SERVER_HOME=$SERVER_HOME
 INSTALL_DIR=$INSTALL_DIR
 STEAMCMD=$STEAMCMD
 PORT=$PORT
+BIND_IP=$BIND_IP
 MAXPLAYERS=$MAXPLAYERS
 START_MAP=$START_MAP
 GAME_TYPE=$GAME_TYPE
@@ -360,6 +395,12 @@ set -Eeuo pipefail
 # shellcheck disable=SC1091
 source /etc/cs2/runtime.conf
 
+# Never run the game server itself as root. If this launcher is invoked
+# manually as root, immediately re-exec it as the configured server user.
+if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    exec runuser -u "$SERVER_USER" -- env HOME="$SERVER_HOME" "$0" "$@"
+fi
+
 GSLT_FILE="$SERVER_HOME/.config/cs2/gslt.token"
 GSLT=""
 if [[ -r "$GSLT_FILE" ]]; then
@@ -370,6 +411,7 @@ ARGS=(
     -dedicated
     -console
     -usercon
+    -ip "$BIND_IP"
     -port "$PORT"
     -maxplayers_override "$MAXPLAYERS"
     +game_type "$GAME_TYPE"
@@ -381,6 +423,20 @@ ARGS=(
 if [[ -n "$GSLT" ]]; then
     ARGS+=(+sv_setsteamaccount "$GSLT")
 fi
+
+# CS2 keeps the V8 runtime in game/bin/linuxsteamrt64 while libserver.so
+# lives in game/csgo/bin/linuxsteamrt64. Some Linux builds do not resolve
+# those V8 dependencies reliably through LD_LIBRARY_PATH alone, so keep
+# compatibility symlinks in the csgo module directory as well.
+LIB_DIR="$INSTALL_DIR/game/bin/linuxsteamrt64"
+CSGO_LIB_DIR="$INSTALL_DIR/game/csgo/bin/linuxsteamrt64"
+
+for lib in "$LIB_DIR"/libv8*.so; do
+    [[ -e "$lib" ]] || continue
+    ln -sfn "$lib" "$CSGO_LIB_DIR/$(basename "$lib")" 2>/dev/null || true
+done
+
+export LD_LIBRARY_PATH="$LIB_DIR:$CSGO_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 exec "$INSTALL_DIR/game/bin/linuxsteamrt64/cs2" "${ARGS[@]}"
 EOF
@@ -508,6 +564,32 @@ source "$CONFIG"
 MANIFEST="$INSTALL_DIR/steamapps/appmanifest_${APPID}.acf"
 RCON_PASSWORD_FILE="$SERVER_HOME/.config/cs2/rcon.password"
 
+ensure_v8_compat_links() {
+    local src_dir="$INSTALL_DIR/game/bin/linuxsteamrt64"
+    local dst_dir="$INSTALL_DIR/game/csgo/bin/linuxsteamrt64"
+    local lib found=0
+
+    install -d -m 0755 -o "$SERVER_USER" -g "$(id -gn "$SERVER_USER")" "$dst_dir"
+
+    for lib in "$src_dir"/libv8*.so; do
+        [[ -e "$lib" ]] || continue
+        found=1
+        ln -sfn "$lib" "$dst_dir/$(basename "$lib")"
+    done
+
+    if (( found == 0 )); then
+        log "WARNING: No libv8*.so libraries found in $src_dir"
+        return 1
+    fi
+
+    chown -h "$SERVER_USER:$(id -gn "$SERVER_USER")" "$dst_dir"/libv8*.so 2>/dev/null || true
+}
+
+# Refresh the compatibility links on every updater run, even when no new
+# CS2 build is available. This also repairs installations affected by the
+# Linux libv8.so loading issue.
+ensure_v8_compat_links || true
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     log "Another update check is already running."
@@ -560,6 +642,14 @@ get_remote_build() {
 
 rcon_say() {
     local message="$1"
+    local rcon_host="$BIND_IP"
+
+    # 0.0.0.0 is valid for binding/listening, but it is not a proper
+    # destination address for an outgoing RCON connection. Use loopback
+    # when CS2 listens on all interfaces.
+    if [[ "$rcon_host" == "0.0.0.0" ]]; then
+        rcon_host="127.0.0.1"
+    fi
 
     if [[ ! -x "$RCON_HELPER" || ! -r "$RCON_PASSWORD_FILE" ]]; then
         log "RCON is unavailable; warning '$message' could not be sent."
@@ -568,7 +658,7 @@ rcon_say() {
 
     if ! runuser -u "$SERVER_USER" -- \
         "$RCON_HELPER" \
-        --host 127.0.0.1 \
+        --host "$rcon_host" \
         --port "$PORT" \
         --password-file "$RCON_PASSWORD_FILE" \
         "say $message" >/dev/null 2>&1; then
@@ -641,6 +731,8 @@ fi
 
 NEW_LOCAL_BUILD="$(get_local_build || true)"
 log "Local build ID after update: ${NEW_LOCAL_BUILD:-unknown}"
+
+ensure_v8_compat_links || true
 
 log "Starting CS2."
 systemctl start cs2.service
@@ -723,6 +815,7 @@ finish() {
     echo "============================================================"
     echo "User:          $SERVER_USER"
     echo "Install dir:   $INSTALL_DIR"
+    echo "Bind IP:       $BIND_IP"
     echo "Port:          $PORT/UDP (Game) + $PORT/TCP (RCON)"
     echo "Slots:         $MAXPLAYERS"
     echo "Start map:     $START_MAP"
@@ -782,6 +875,7 @@ main() {
     create_user
     install_steamcmd
     install_cs2
+    install_v8_compat_links
     install_steam_sdk_links
     write_runtime_config
     write_start_script
