@@ -7,6 +7,8 @@ CONFIG_DIR="/etc/cs2"
 RUNTIME_CONF="$CONFIG_DIR/runtime.conf"
 UPDATE_MESSAGE_FILE="$CONFIG_DIR/update-message.txt"
 START_SCRIPT="/usr/local/bin/cs2-start"
+WORKSHOP_CONF="$CONFIG_DIR/workshop.conf"
+WORKSHOP_HELPER="/usr/local/bin/cs2-workshop"
 RCON_HELPER="/usr/local/libexec/cs2-rcon"
 UPDATER_SCRIPT="/usr/local/sbin/cs2-autoupdate"
 SERVICE_FILE="/etc/systemd/system/cs2.service"
@@ -351,6 +353,17 @@ GAME_MODE=$GAME_MODE
 EOF
     chmod 0644 "$RUNTIME_CONF"
 
+    # Keep Workshop mode in a separate file so it can be changed later without
+    # rerunning the installer. Do not overwrite an existing Workshop setup.
+    if [[ ! -f "$WORKSHOP_CONF" ]]; then
+        cat > "$WORKSHOP_CONF" <<'EOF'
+WORKSHOP_ENABLED=0
+WORKSHOP_COLLECTION=
+WORKSHOP_MAP=
+EOF
+        chmod 0644 "$WORKSHOP_CONF"
+    fi
+
     printf '%s\n' "$UPDATE_MESSAGE" > "$UPDATE_MESSAGE_FILE"
     chmod 0644 "$UPDATE_MESSAGE_FILE"
 
@@ -395,6 +408,15 @@ set -Eeuo pipefail
 # shellcheck disable=SC1091
 source /etc/cs2/runtime.conf
 
+WORKSHOP_CONF="/etc/cs2/workshop.conf"
+WORKSHOP_ENABLED=0
+WORKSHOP_COLLECTION=""
+WORKSHOP_MAP=""
+if [[ -r "$WORKSHOP_CONF" ]]; then
+    # shellcheck disable=SC1090
+    source "$WORKSHOP_CONF"
+fi
+
 # Never run the game server itself as root. If this launcher is invoked
 # manually as root, immediately re-exec it as the configured server user.
 if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
@@ -416,9 +438,27 @@ ARGS=(
     -maxplayers_override "$MAXPLAYERS"
     +game_type "$GAME_TYPE"
     +game_mode "$GAME_MODE"
-    +map "$START_MAP"
     +exec server.cfg
 )
+
+if [[ "$WORKSHOP_ENABLED" == "1" ]]; then
+    [[ "$WORKSHOP_COLLECTION" =~ ^[0-9]+$ ]] || {
+        echo "Invalid Workshop collection ID in $WORKSHOP_CONF" >&2
+        exit 1
+    }
+    [[ "$WORKSHOP_MAP" =~ ^[0-9]+$ ]] || {
+        echo "Invalid Workshop map ID in $WORKSHOP_CONF" >&2
+        exit 1
+    }
+
+    # Workshop mode replaces the normal +map startup parameter.
+    ARGS+=(
+        +host_workshop_collection "$WORKSHOP_COLLECTION"
+        +host_workshop_map "$WORKSHOP_MAP"
+    )
+else
+    ARGS+=(+map "$START_MAP")
+fi
 
 if [[ -n "$GSLT" ]]; then
     ARGS+=(+sv_setsteamaccount "$GSLT")
@@ -441,6 +481,183 @@ export LD_LIBRARY_PATH="$LIB_DIR:$CSGO_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PA
 exec "$INSTALL_DIR/game/bin/linuxsteamrt64/cs2" "${ARGS[@]}"
 EOF
     chmod 0755 "$START_SCRIPT"
+}
+
+write_workshop_helper() {
+    cat > "$WORKSHOP_HELPER" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+CONFIG="/etc/cs2/workshop.conf"
+SERVICE="cs2.service"
+
+need_root() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || {
+        echo "Please run as root: sudo $0 $*" >&2
+        exit 1
+    }
+}
+
+valid_id() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+load_config() {
+    WORKSHOP_ENABLED=0
+    WORKSHOP_COLLECTION=""
+    WORKSHOP_MAP=""
+    if [[ -r "$CONFIG" ]]; then
+        # shellcheck disable=SC1090
+        source "$CONFIG"
+    fi
+}
+
+save_config() {
+    local enabled="$1" collection="$2" map="$3"
+    local tmp
+    tmp="$(mktemp)"
+    cat > "$tmp" <<CFG
+WORKSHOP_ENABLED=$enabled
+WORKSHOP_COLLECTION=$collection
+WORKSHOP_MAP=$map
+CFG
+    install -m 0644 "$tmp" "$CONFIG"
+    rm -f "$tmp"
+}
+
+show_status() {
+    load_config
+    if [[ "$WORKSHOP_ENABLED" == "1" ]]; then
+        echo "Workshop mode:       enabled"
+        echo "Workshop collection: $WORKSHOP_COLLECTION"
+        echo "Workshop start map:  $WORKSHOP_MAP"
+    else
+        echo "Workshop mode:       disabled"
+        echo "The server uses START_MAP from /etc/cs2/runtime.conf."
+    fi
+}
+
+restart_if_requested() {
+    local answer
+    read -r -p "Restart CS2 now? [Y/n]: " answer
+    answer="${answer:-y}"
+    if [[ "$answer" =~ ^[YyJj]$ ]]; then
+        systemctl restart "$SERVICE"
+        systemctl --no-pager --full status "$SERVICE" || true
+    fi
+}
+
+enable_workshop() {
+    local collection="${1:-}" map="${2:-}"
+
+    if [[ -z "$collection" ]]; then
+        read -r -p "Workshop collection ID: " collection
+    fi
+    if [[ -z "$map" ]]; then
+        read -r -p "Workshop start map ID: " map
+    fi
+
+    valid_id "$collection" || {
+        echo "Invalid Workshop collection ID: $collection" >&2
+        exit 2
+    }
+    valid_id "$map" || {
+        echo "Invalid Workshop map ID: $map" >&2
+        exit 2
+    }
+
+    save_config 1 "$collection" "$map"
+    echo "Workshop mode enabled."
+    echo "Startup parameters: +host_workshop_collection $collection +host_workshop_map $map"
+}
+
+disable_workshop() {
+    load_config
+    save_config 0 "$WORKSHOP_COLLECTION" "$WORKSHOP_MAP"
+    echo "Workshop mode disabled. The normal START_MAP will be used on the next start."
+}
+
+usage() {
+    cat <<USAGE
+Usage:
+  sudo cs2-workshop                         Interactive menu
+  sudo cs2-workshop enable <collection> <map>
+  sudo cs2-workshop disable
+  sudo cs2-workshop status
+
+Examples:
+  sudo cs2-workshop enable 3791159560 3722688576
+  sudo cs2-workshop status
+  sudo cs2-workshop disable
+USAGE
+}
+
+interactive_menu() {
+    load_config
+    echo "CS2 Workshop helper"
+    echo "-------------------"
+    show_status
+    echo
+    echo "1) Enable/update Workshop mode"
+    echo "2) Disable Workshop mode"
+    echo "3) Show status"
+    echo "4) Exit"
+    echo
+    read -r -p "Selection [1]: " choice
+    choice="${choice:-1}"
+
+    case "$choice" in
+        1)
+            enable_workshop
+            restart_if_requested
+            ;;
+        2)
+            disable_workshop
+            restart_if_requested
+            ;;
+        3)
+            show_status
+            ;;
+        4)
+            exit 0
+            ;;
+        *)
+            echo "Invalid selection." >&2
+            exit 2
+            ;;
+    esac
+}
+
+need_root "$@"
+
+case "${1:-}" in
+    "")
+        interactive_menu
+        ;;
+    enable)
+        [[ $# -le 3 ]] || { usage; exit 2; }
+        enable_workshop "${2:-}" "${3:-}"
+        restart_if_requested
+        ;;
+    disable)
+        [[ $# -eq 1 ]] || { usage; exit 2; }
+        disable_workshop
+        restart_if_requested
+        ;;
+    status)
+        [[ $# -eq 1 ]] || { usage; exit 2; }
+        show_status
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
+EOF
+    chmod 0755 "$WORKSHOP_HELPER"
 }
 
 write_rcon_helper() {
@@ -830,6 +1047,12 @@ finish() {
     echo "  systemctl status cs2"
     echo "  journalctl -fu cs2"
     echo
+    echo "Workshop helper:"
+    echo "  cs2-workshop"
+    echo "  cs2-workshop enable 3791159560 3722688576"
+    echo "  cs2-workshop status"
+    echo "  cs2-workshop disable"
+    echo
     echo "Updater:"
     echo "  systemctl status cs2-autoupdate.timer"
     echo "  systemctl start cs2-autoupdate.service"
@@ -879,6 +1102,7 @@ main() {
     install_steam_sdk_links
     write_runtime_config
     write_start_script
+    write_workshop_helper
     write_rcon_helper
     write_updater
     write_systemd_units
